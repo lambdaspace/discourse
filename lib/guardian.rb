@@ -200,6 +200,7 @@ class Guardian
 
   def can_invite_to_forum?(groups=nil)
     authenticated? &&
+    (SiteSetting.max_invites_per_day.to_i > 0 || is_staff?) &&
     !SiteSetting.enable_sso &&
     SiteSetting.enable_local_logins &&
     (
@@ -213,15 +214,14 @@ class Guardian
     return false if ! authenticated?
     return false unless ( SiteSetting.enable_local_logins && (!SiteSetting.must_approve_users? || is_staff?) )
     return true if is_admin?
+    return false if (SiteSetting.max_invites_per_day.to_i == 0 && !is_staff?)
     return false if ! can_see?(object)
-
     return false if group_ids.present?
 
     if object.is_a?(Topic) && object.category
       if object.category.groups.any?
         return true if object.category.groups.all? { |g| can_edit_group?(g) }
       end
-      return false if object.category.read_restricted
     end
 
     user.has_trust_level?(TrustLevel[2])
@@ -250,7 +250,7 @@ class Guardian
     # Can't send message to yourself
     is_not_me?(target) &&
     # Have to be a basic level at least
-    @user.has_trust_level?(TrustLevel[1]) &&
+    @user.has_trust_level?(SiteSetting.min_trust_to_send_messages) &&
     # PMs are enabled
     (SiteSetting.enable_private_messages ||
       @user.username == SiteSetting.site_contact_username ||

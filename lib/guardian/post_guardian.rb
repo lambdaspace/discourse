@@ -1,5 +1,6 @@
 #mixin for all guardian methods dealing with post permissions
 module PostGuardian
+
   # Can the user act on the post in a particular way.
   #  taken_actions = the list of actions the user has already taken
   def post_can_act?(post, action_key, opts={})
@@ -29,7 +30,7 @@ module PostGuardian
       not(action_key == :like && is_my_own?(post)) &&
 
       # new users can't notify_user because they are not allowed to send private messages
-      not(action_key == :notify_user && !@user.has_trust_level?(TrustLevel[1])) &&
+      not(action_key == :notify_user && !@user.has_trust_level?(SiteSetting.min_trust_to_send_messages)) &&
 
       # can't send private messages if they're disabled globally
       not(action_key == :notify_user && !SiteSetting.enable_private_messages) &&
@@ -115,7 +116,7 @@ module PostGuardian
   # Deleting Methods
   def can_delete_post?(post)
     # Can't delete the first post
-    return false if post.post_number == 1
+    return false if post.is_first_post?
 
     # Can't delete after post_edit_time_limit minutes have passed
     return false if !is_staff? && post.edit_time_limit_expired?
@@ -143,10 +144,13 @@ module PostGuardian
   end
 
   def can_see_post?(post)
-    post.present? &&
-      (is_admin? ||
-      ((is_moderator? || !post.deleted_at.present?) &&
-        can_see_topic?(post.topic)))
+    return false if post.blank?
+    return true if is_admin?
+    return false unless can_see_topic?(post.topic)
+    return false unless post.user == @user || Topic.visible_post_types(@user).include?(post.post_type)
+    return false if !is_moderator? && post.deleted_at.present?
+
+    true
   end
 
   def can_view_edit_history?(post)

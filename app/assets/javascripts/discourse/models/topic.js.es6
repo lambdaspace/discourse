@@ -1,7 +1,19 @@
-import TopicDetails from 'discourse/models/topic-details';
-import PostStream from 'discourse/models/post-stream';
+import { flushMap } from 'discourse/models/store';
+import RestModel from 'discourse/models/rest';
+import { propertyEqual } from 'discourse/lib/computed';
+import { longDate } from 'discourse/lib/formatter';
+import computed from 'ember-addons/ember-computed-decorators';
 
-const Topic = Discourse.Model.extend({
+const Topic = RestModel.extend({
+  message: null,
+  errorLoading: false,
+
+  @computed('fancy_title')
+  fancyTitle(title) {
+    title = title || "";
+    title = Discourse.Emoji.unescape(title);
+    return Discourse.CensoredWords.censor(title);
+  },
 
   // returns createdAt if there's no bumped date
   bumpedAt: function() {
@@ -14,8 +26,8 @@ const Topic = Discourse.Model.extend({
   }.property('bumped_at', 'createdAt'),
 
   bumpedAtTitle: function() {
-    return I18n.t('first_post') + ": " + Discourse.Formatter.longDate(this.get('createdAt')) + "\n" +
-           I18n.t('last_post') + ": " + Discourse.Formatter.longDate(this.get('bumpedAt'));
+    return I18n.t('first_post') + ": " + longDate(this.get('createdAt')) + "\n" +
+           I18n.t('last_post') + ": " + longDate(this.get('bumpedAt'));
   }.property('bumpedAt'),
 
   createdAt: function() {
@@ -23,7 +35,7 @@ const Topic = Discourse.Model.extend({
   }.property('created_at'),
 
   postStream: function() {
-    return PostStream.create({topic: this});
+    return this.store.createRecord('postStream', {id: this.get('id'), topic: this});
   }.property(),
 
   replyCount: function() {
@@ -31,7 +43,7 @@ const Topic = Discourse.Model.extend({
   }.property('posts_count'),
 
   details: function() {
-    return TopicDetails.create({topic: this});
+    return this.store.createRecord('topicDetails', {id: this.get('id'), topic: this});
   }.property(),
 
   invisible: Em.computed.not('visible'),
@@ -41,18 +53,18 @@ const Topic = Discourse.Model.extend({
     return ({ type: 'topic', id: this.get('id') });
   }.property('id'),
 
-  category: function() {
-    const categoryId = this.get('category_id');
-    if (categoryId) {
-      return Discourse.Category.list().findProperty('id', categoryId);
-    }
+  _categoryIdChanged: function() {
+    this.set('category', Discourse.Category.findById(this.get('category_id')));
+  }.observes('category_id').on('init'),
 
+  _categoryNameChanged: function() {
     const categoryName = this.get('categoryName');
+    let category;
     if (categoryName) {
-      return Discourse.Category.list().findProperty('name', categoryName);
+      category = Discourse.Category.list().findProperty('name', categoryName);
     }
-    return null;
-  }.property('category_id', 'categoryName'),
+    this.set('category', category);
+  }.observes('categoryName'),
 
   categoryClass: function() {
     return 'category-' + this.get('category.fullSlug');
@@ -64,7 +76,7 @@ const Topic = Discourse.Model.extend({
   }.property('url'),
 
   url: function() {
-    let slug = this.get('slug');
+    let slug = this.get('slug') || '';
     if (slug.trim().length === 0) {
       slug = "topic";
     }
@@ -148,13 +160,21 @@ const Topic = Discourse.Model.extend({
     this.saveStatus(property, !!this.get(property));
   },
 
-  saveStatus(property, value) {
-    if (property === 'closed' && value === true) {
-      this.set('details.auto_close_at', null);
+  saveStatus(property, value, until) {
+    if (property === 'closed') {
+      this.incrementProperty('posts_count');
+
+      if (value === true) {
+        this.set('details.auto_close_at', null);
+      }
     }
     return Discourse.ajax(this.get('url') + "/status", {
       type: 'PUT',
-      data: { status: property, enabled: !!value }
+      data: {
+        status: property,
+        enabled: !!value,
+        until: until
+      }
     });
   },
 
@@ -240,6 +260,13 @@ const Topic = Discourse.Model.extend({
     return Discourse.ajax("/t/" + this.get('id') + "/invite", {
       type: 'POST',
       data: { user: emailOrUsername, group_names: groupNames }
+    });
+  },
+
+  generateInviteLink: function(email, groupNames, topicId) {
+    return Discourse.ajax('/invites/link', {
+      type: 'POST',
+      data: {email: email, group_names: groupNames, topic_id: topicId}
     });
   },
 
@@ -347,15 +374,14 @@ const Topic = Discourse.Model.extend({
     );
   },
 
-  excerptNotEmpty: Em.computed.notEmpty('excerpt'),
-  hasExcerpt: Em.computed.and('pinned', 'excerptNotEmpty'),
+  hasExcerpt: Em.computed.notEmpty('excerpt'),
 
   excerptTruncated: function() {
     const e = this.get('excerpt');
     return( e && e.substr(e.length - 8,8) === '&hellip;' );
   }.property('excerpt'),
 
-  readLastPost: Discourse.computed.propertyEqual('last_read_post_number', 'highest_post_number'),
+  readLastPost: propertyEqual('last_read_post_number', 'highest_post_number'),
   canClearPin: Em.computed.and('pinned', 'readLastPost')
 
 });
@@ -408,7 +434,6 @@ Topic.reopenClass({
       // The title can be cleaned up server side
       props.title = result.basic_topic.title;
       props.fancy_title = result.basic_topic.fancy_title;
-
       topic.setProperties(props);
     });
   },
@@ -417,16 +442,6 @@ Topic.reopenClass({
     const result = this._super.apply(this, arguments);
     this.createActionSummary(result);
     return result;
-  },
-
-  findSimilarTo(title, body) {
-    return Discourse.ajax("/topics/similar_to", { data: {title: title, raw: body} }).then(function (results) {
-      if (Array.isArray(results)) {
-        return results.map(function(topic) { return Topic.create(topic); });
-      } else {
-        return Ember.A();
-      }
-    });
   },
 
   // Load a topic, but accepts a set of filters
@@ -465,28 +480,6 @@ Topic.reopenClass({
     return Discourse.ajax(url + ".json", {data: data});
   },
 
-  mergeTopic(topicId, destinationTopicId) {
-    const promise = Discourse.ajax("/t/" + topicId + "/merge-topic", {
-      type: 'POST',
-      data: {destination_topic_id: destinationTopicId}
-    }).then(function (result) {
-      if (result.success) return result;
-      promise.reject(new Error("error merging topic"));
-    });
-    return promise;
-  },
-
-  movePosts(topicId, opts) {
-    const promise = Discourse.ajax("/t/" + topicId + "/move-posts", {
-      type: 'POST',
-      data: opts
-    }).then(function (result) {
-      if (result.success) return result;
-      promise.reject(new Error("error moving posts topic"));
-    });
-    return promise;
-  },
-
   changeOwners(topicId, opts) {
     const promise = Discourse.ajax("/t/" + topicId + "/change-owner", {
       type: 'POST',
@@ -494,6 +487,17 @@ Topic.reopenClass({
     }).then(function (result) {
       if (result.success) return result;
       promise.reject(new Error("error changing ownership of posts"));
+    });
+    return promise;
+  },
+
+  changeTimestamp(topicId, timestamp) {
+    const promise = Discourse.ajax("/t/" + topicId + '/change-timestamp', {
+      type: 'PUT',
+      data: { timestamp: timestamp },
+    }).then(function(result) {
+      if (result.success) return result;
+      promise.reject(new Error("error updating timestamp of topic"));
     });
     return promise;
   },
@@ -525,5 +529,25 @@ Topic.reopenClass({
     return Discourse.ajax("/t/id_for/" + slug);
   }
 });
+
+function moveResult(result) {
+  if (result.success) {
+    // We should be hesitant to flush the map but moving ids is one rare case
+    flushMap();
+    return result;
+  }
+  throw "error moving posts topic";
+}
+
+export function movePosts(topicId, data) {
+  return Discourse.ajax("/t/" + topicId + "/move-posts", { type: 'POST', data }).then(moveResult);
+}
+
+export function mergeTopic(topicId, destinationTopicId) {
+  return Discourse.ajax("/t/" + topicId + "/merge-topic", {
+    type: 'POST',
+    data: {destination_topic_id: destinationTopicId}
+  }).then(moveResult);
+}
 
 export default Topic;

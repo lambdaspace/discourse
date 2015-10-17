@@ -56,7 +56,7 @@ module ApplicationHelper
   end
 
   def html_classes
-    "#{mobile_view? ? 'mobile-view' : 'desktop-view'} #{mobile_device? ? 'mobile-device' : 'not-mobile-device'} #{rtl_class}"
+    "#{mobile_view? ? 'mobile-view' : 'desktop-view'} #{mobile_device? ? 'mobile-device' : 'not-mobile-device'} #{rtl_class} #{current_user ? '' : 'anon'}"
   end
 
   def rtl_class
@@ -72,6 +72,10 @@ module ApplicationHelper
     else
       ''
     end
+  end
+
+  def unescape_emoji(title)
+    PrettyText.unescape_emoji(title)
   end
 
   def with_format(format, &block)
@@ -106,12 +110,20 @@ module ApplicationHelper
     current_user.try(:staff?)
   end
 
+  def rtl?
+    ["ar", "fa_IR", "he"].include?(user_locale)
+  end
+
+  def user_locale
+    locale = current_user.locale if current_user && SiteSetting.allow_user_locale
+    # changing back to default shoves a blank string there
+    locale.present? ? locale : SiteSetting.default_locale
+  end
+
   # Creates open graph and twitter card meta data
   def crawlable_meta_data(opts=nil)
-
     opts ||= {}
-    opts[:image] ||= "#{Discourse.base_url}#{SiteSetting.logo_small_url}"
-    opts[:url] ||= "#{Discourse.base_url}#{request.fullpath}"
+    opts[:url] ||= "#{Discourse.base_url_no_prefix}#{request.fullpath}"
 
     # Use the correct scheme for open graph
     if opts[:image].present? && opts[:image].start_with?("//")
@@ -120,21 +132,19 @@ module ApplicationHelper
     end
 
     # Add opengraph tags
-    result =  tag(:meta, property: 'og:site_name', content: SiteSetting.title) << "\n"
-
+    result = []
+    result << tag(:meta, property: 'og:site_name', content: SiteSetting.title)
     result << tag(:meta, name: 'twitter:card', content: "summary")
 
-    # I removed image related opengraph tags from here for now due to
-    # https://meta.discourse.org/t/x/22744/18
-    [:url, :title, :description].each do |property|
+    [:url, :title, :description, :image].each do |property|
       if opts[property].present?
         escape = (property != :image)
-        result << tag(:meta, {property: "og:#{property}", content: opts[property]}, nil, escape) << "\n"
-        result << tag(:meta, {name: "twitter:#{property}", content: opts[property]}, nil, escape) << "\n"
+        result << tag(:meta, { property: "og:#{property}", content: opts[property] }, nil, escape)
+        result << tag(:meta, { name: "twitter:#{property}", content: opts[property] }, nil, escape)
       end
     end
 
-    result
+    result.join("\n")
   end
 
   # Look up site content for a key. If the key is blank, you can supply a block and that
@@ -175,6 +185,24 @@ module ApplicationHelper
 
   def category_badge(category, opts=nil)
     CategoryBadge.html_for(category, opts).html_safe
+  end
+
+  def self.all_connectors
+    @all_connectors = Dir.glob("plugins/*/app/views/connectors/**/*.html.erb")
+  end
+
+  def server_plugin_outlet(name)
+
+    # Don't evaluate plugins in test
+    return "" if Rails.env.test?
+
+    matcher = Regexp.new("/connectors/#{name}/.*\.html\.erb$")
+    erbs = ApplicationHelper.all_connectors.select {|c| c =~ matcher }
+    return "" if erbs.blank?
+
+    result = ""
+    erbs.each {|erb| result << render(file: erb) }
+    result.html_safe
   end
 
 end

@@ -3,7 +3,8 @@ require File.expand_path(File.dirname(__FILE__) + "/base.rb")
 
 class ImportScripts::Drupal < ImportScripts::Base
 
-  DRUPAL_DB = "newsite3"
+  DRUPAL_DB = ENV['DRUPAL_DB'] || "newsite3"
+  VID = ENV['DRUPAL_VID'] || 1
 
   def initialize
     super
@@ -17,7 +18,7 @@ class ImportScripts::Drupal < ImportScripts::Base
   end
 
   def categories_query
-    @client.query("SELECT tid, name, description FROM taxonomy_term_data WHERE vid = 1")
+    @client.query("SELECT tid, name, description FROM taxonomy_term_data WHERE vid = #{VID}")
   end
 
   def execute
@@ -37,7 +38,10 @@ class ImportScripts::Drupal < ImportScripts::Base
     # "Nodes" in Drupal are divided into types. Here we import two types,
     # and will later import all the comments/replies for each node.
     # You will need to figure out what the type names are on your install and edit the queries to match.
-    create_blog_topics
+    if ENV['DRUPAL_IMPORT_BLOG']
+      create_blog_topics
+    end
+
     create_forum_topics
 
     create_replies
@@ -117,6 +121,8 @@ class ImportScripts::Drupal < ImportScripts::Base
 
       break if results.size < 1
 
+      next if all_records_exist? :posts, results.map {|p| "nid:#{p['nid']}"}
+
       create_posts(results, total: total_count, offset: offset) do |row|
         {
           id: "nid:#{row['nid']}",
@@ -162,6 +168,8 @@ class ImportScripts::Drupal < ImportScripts::Base
       ", cache_rows: false)
 
       break if results.size < 1
+
+      next if all_records_exist? :posts, results.map {|p| "cid:#{p['cid']}"}
 
       create_posts(results, total: total_count, offset: offset) do |row|
         topic_mapping = topic_lookup_from_imported_post_id("nid:#{row['nid']}")

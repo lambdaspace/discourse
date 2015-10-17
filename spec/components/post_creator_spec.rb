@@ -21,6 +21,12 @@ describe PostCreator do
     let(:creator_with_meta_data) { PostCreator.new(user, basic_topic_params.merge(meta_data: {hello: "world"} )) }
     let(:creator_with_image_sizes) { PostCreator.new(user, basic_topic_params.merge(image_sizes: image_sizes)) }
 
+    it "can create a topic with null byte central" do
+      post = PostCreator.create(user, title: "hello\u0000world this is title", raw: "this is my\u0000 first topic")
+      expect(post.raw).to eq 'this is my first topic'
+      expect(post.topic.title).to eq 'Helloworld this is title'
+    end
+
     it "can be created with auto tracking disabled" do
       p = PostCreator.create(user, basic_topic_params.merge(auto_track: false))
       # must be 0 otherwise it will think we read the topic which is clearly untrue
@@ -32,27 +38,29 @@ describe PostCreator do
       expect { creator.create }.to raise_error(Discourse::InvalidAccess)
     end
 
+    context "reply to post number" do
+      it "omits reply to post number if received on a new topic" do
+        p = PostCreator.new(user, basic_topic_params.merge(reply_to_post_number: 3)).create
+        expect(p.reply_to_post_number).to be_nil
+      end
+    end
 
     context "invalid title" do
-
       let(:creator_invalid_title) { PostCreator.new(user, basic_topic_params.merge(title: 'a')) }
 
       it "has errors" do
         creator_invalid_title.create
         expect(creator_invalid_title.errors).to be_present
       end
-
     end
 
     context "invalid raw" do
-
       let(:creator_invalid_raw) { PostCreator.new(user, basic_topic_params.merge(raw: '')) }
 
       it "has errors" do
         creator_invalid_raw.create
         expect(creator_invalid_raw.errors).to be_present
       end
-
     end
 
     context "success" do
@@ -60,6 +68,17 @@ describe PostCreator do
       it "doesn't return true for spam" do
         creator.create
         expect(creator.spam?).to eq(false)
+      end
+
+      it "triggers extensibility events" do
+        DiscourseEvent.expects(:trigger).with(:before_create_post, anything).once
+        DiscourseEvent.expects(:trigger).with(:validate_post, anything).once
+        DiscourseEvent.expects(:trigger).with(:topic_created, anything, anything, user).once
+        DiscourseEvent.expects(:trigger).with(:post_created, anything, anything, user).once
+        DiscourseEvent.expects(:trigger).with(:after_validate_topic, anything, anything).once
+        DiscourseEvent.expects(:trigger).with(:before_create_topic, anything, anything).once
+        DiscourseEvent.expects(:trigger).with(:after_trigger_post_process, anything).once
+        creator.create
       end
 
       it "does not notify on system messages" do
@@ -137,6 +156,7 @@ describe PostCreator do
       it 'queues up post processing job when saved' do
         Jobs.expects(:enqueue).with(:feature_topic_users, has_key(:topic_id))
         Jobs.expects(:enqueue).with(:process_post, has_key(:post_id))
+        Jobs.expects(:enqueue).with(:post_alert, has_key(:post_id))
         Jobs.expects(:enqueue).with(:notify_mailing_list_subscribers, has_key(:post_id))
         creator.create
       end
@@ -144,6 +164,7 @@ describe PostCreator do
       it 'passes the invalidate_oneboxes along to the job if present' do
         Jobs.stubs(:enqueue).with(:feature_topic_users, has_key(:topic_id))
         Jobs.expects(:enqueue).with(:notify_mailing_list_subscribers, has_key(:post_id))
+        Jobs.expects(:enqueue).with(:post_alert, has_key(:post_id))
         Jobs.expects(:enqueue).with(:process_post, has_key(:invalidate_oneboxes))
         creator.opts[:invalidate_oneboxes] = true
         creator.create
@@ -152,6 +173,7 @@ describe PostCreator do
       it 'passes the image_sizes along to the job if present' do
         Jobs.stubs(:enqueue).with(:feature_topic_users, has_key(:topic_id))
         Jobs.expects(:enqueue).with(:notify_mailing_list_subscribers, has_key(:post_id))
+        Jobs.expects(:enqueue).with(:post_alert, has_key(:post_id))
         Jobs.expects(:enqueue).with(:process_post, has_key(:image_sizes))
         creator.opts[:image_sizes] = {'http://an.image.host/image.jpg' => {'width' => 17, 'height' => 31}}
         creator.create
@@ -202,6 +224,21 @@ describe PostCreator do
         }.to_not change { topic.excerpt }
       end
 
+      it 'creates post stats' do
+
+        Draft.set(user, 'new_topic', 0, "test")
+        Draft.set(user, 'new_topic', 0, "test1")
+
+        begin
+          PostCreator.track_post_stats = true
+          post = creator.create
+          expect(post.post_stat.typing_duration_msecs).to eq(0)
+          expect(post.post_stat.drafts_saved).to eq(2)
+        ensure
+          PostCreator.track_post_stats = false
+        end
+      end
+
       describe "topic's auto close" do
 
         it "doesn't update topic's auto close when it's not based on last post" do
@@ -234,6 +271,30 @@ describe PostCreator do
         post = PostCreator.new(user, basic_topic_params.merge(auto_close_time: 2)).create
         expect(post.topic.auto_close_at).to eq(nil)
       end
+    end
+  end
+
+  context 'whisper' do
+    let!(:topic) { Fabricate(:topic, user: user) }
+
+    it 'forces replies to whispers to be whispers' do
+      whisper = PostCreator.new(user,
+                                topic_id: topic.id,
+                                reply_to_post_number: 1,
+                                post_type: Post.types[:whisper],
+                                raw: 'this is a whispered reply').create
+
+      expect(whisper).to be_present
+      expect(whisper.post_type).to eq(Post.types[:whisper])
+
+      whisper_reply = PostCreator.new(user,
+                                      topic_id: topic.id,
+                                      reply_to_post_number: whisper.post_number,
+                                      post_type: Post.types[:regular],
+                                      raw: 'replying to a whisper this time').create
+
+      expect(whisper_reply).to be_present
+      expect(whisper_reply.post_type).to eq(Post.types[:whisper])
     end
   end
 
@@ -311,7 +372,8 @@ describe PostCreator do
 
     it "does not create the post" do
       GroupMessage.stubs(:create)
-      creator.create
+      _post = creator.create
+
       expect(creator.errors).to be_present
       expect(creator.spam?).to eq(true)
     end
@@ -383,7 +445,7 @@ describe PostCreator do
                                 raw: raw,
                                 cooking_options: { traditional_markdown_linebreaks: true })
 
-      Post.any_instance.expects(:cook).with(raw, has_key(:traditional_markdown_linebreaks)).returns(raw)
+      Post.any_instance.expects(:cook).with(raw, has_key(:traditional_markdown_linebreaks)).twice.returns(raw)
       creator.create
     end
   end
@@ -490,6 +552,7 @@ describe PostCreator do
       # does not notify an unrelated user
       expect(unrelated.notifications.count).to eq(0)
       expect(post.topic.subtype).to eq(TopicSubtype.user_to_user)
+
       expect(target_user1.notifications.count).to eq(1)
       expect(target_user2.notifications.count).to eq(1)
     end
@@ -521,7 +584,7 @@ describe PostCreator do
     it 'can save a post' do
       creator = PostCreator.new(user, raw: 'q', title: 'q', skip_validations: true)
       creator.create
-      expect(creator.errors).to eq(nil)
+      expect(creator.errors).to be_blank
     end
   end
 
@@ -546,7 +609,17 @@ describe PostCreator do
                                 title: 'Reviews of Science Ovens',
                                 raw: 'Did you know that you can use microwaves to cook your dinner? Science!')
       creator.create
+      expect(creator.errors).to be_blank
       expect(TopicEmbed.where(embed_url: embed_url).exists?).to eq(true)
+
+      # If we try to create another topic with the embed url, should fail
+      creator = PostCreator.new(user,
+                                embed_url: embed_url,
+                                title: 'More Reviews of Science Ovens',
+                                raw: 'As if anyone ever wanted to learn more about them!')
+      result = creator.create
+      expect(result).to be_present
+      expect(creator.errors).to be_present
     end
   end
 
@@ -573,8 +646,42 @@ describe PostCreator do
   end
 
   it "doesn't strip starting whitespaces" do
-    post = PostCreator.new(user, { title: "testing whitespace stripping", raw: "    <-- whitespaces -->    " }).create
+    pc = PostCreator.new(user, { title: "testing whitespace stripping", raw: "    <-- whitespaces -->    " })
+    post = pc.create
     expect(post.raw).to eq("    <-- whitespaces -->")
+  end
+
+  context "events" do
+    let(:topic) { Fabricate(:topic, user: user) }
+
+    before do
+      @posts_created = 0
+      @topics_created = 0
+
+      @increase_posts = -> (post, opts, user) { @posts_created += 1 }
+      @increase_topics = -> (topic, opts, user) { @topics_created += 1 }
+      DiscourseEvent.on(:post_created, &@increase_posts)
+      DiscourseEvent.on(:topic_created, &@increase_topics)
+    end
+
+    after do
+      DiscourseEvent.off(:post_created, &@increase_posts)
+      DiscourseEvent.off(:topic_created, &@increase_topics)
+    end
+
+    it "fires boths event when creating a topic" do
+      pc = PostCreator.new(user, raw: 'this is the new content for my topic', title: 'this is my new topic title')
+      _post = pc.create
+      expect(@posts_created).to eq(1)
+      expect(@topics_created).to eq(1)
+    end
+
+    it "fires only the post event when creating a post" do
+      pc = PostCreator.new(user, topic_id: topic.id, raw: 'this is the new content for my post')
+      _post = pc.create
+      expect(@posts_created).to eq(1)
+      expect(@topics_created).to eq(0)
+    end
   end
 
 end

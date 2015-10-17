@@ -63,10 +63,18 @@ describe Guardian do
     end
 
     it "returns false for notify_user if private messages are disabled" do
-      SiteSetting.stubs(:enable_private_messages).returns(false)
+      SiteSetting.enable_private_messages = false
       user.trust_level = TrustLevel[2]
       expect(Guardian.new(user).post_can_act?(post, :notify_user)).to be_falsey
       expect(Guardian.new(user).post_can_act?(post, :notify_moderators)).to be_falsey
+    end
+
+    it "returns false for notify_user if private messages are enabled but threshold not met" do
+      SiteSetting.enable_private_messages = true
+      SiteSetting.min_trust_to_send_messages = 2
+      user.trust_level = TrustLevel[1]
+      expect(Guardian.new(user).post_can_act?(post, :notify_user)).to be_falsey
+      expect(Guardian.new(user).post_can_act?(post, :notify_moderators)).to be_truthy
     end
 
     describe "trust levels" do
@@ -148,15 +156,21 @@ describe Guardian do
       expect(Guardian.new(user).can_send_private_message?(another_user)).to be_truthy
     end
 
+    it "disallows pms to other users if trust level is not met" do
+      SiteSetting.min_trust_to_send_messages = TrustLevel[2]
+      user.trust_level = TrustLevel[1]
+      expect(Guardian.new(user).can_send_private_message?(another_user)).to be_falsey
+    end
+
     context "enable_private_messages is false" do
-      before { SiteSetting.stubs(:enable_private_messages).returns(false) }
+      before { SiteSetting.enable_private_messages = false }
 
       it "returns false if user is not the contact user" do
         expect(Guardian.new(user).can_send_private_message?(another_user)).to be_falsey
       end
 
       it "returns true for the contact user and system user" do
-        SiteSetting.stubs(:site_contact_username).returns(user.username)
+        SiteSetting.site_contact_username = user.username
         expect(Guardian.new(user).can_send_private_message?(another_user)).to be_truthy
         expect(Guardian.new(Discourse.system_user).can_send_private_message?(another_user)).to be_truthy
       end
@@ -245,6 +259,15 @@ describe Guardian do
       expect(Guardian.new(moderator).can_invite_to_forum?).to be_truthy
     end
 
+    it 'returns false when max_invites_per_day is 0' do
+      # let's also break it while here
+      SiteSetting.max_invites_per_day = "a"
+
+      expect(Guardian.new(user).can_invite_to_forum?).to be_falsey
+      # staff should be immune to max_invites_per_day setting
+      expect(Guardian.new(moderator).can_invite_to_forum?).to be_truthy
+    end
+
     it 'returns false when the site requires approving users and is regular' do
       SiteSetting.expects(:must_approve_users?).returns(true)
       expect(Guardian.new(user).can_invite_to_forum?).to be_falsey
@@ -275,6 +298,12 @@ describe Guardian do
       expect(Guardian.new(moderator).can_invite_to?(nil)).to be_falsey
       expect(Guardian.new(moderator).can_invite_to?(topic)).to be_truthy
       expect(Guardian.new(user).can_invite_to?(topic)).to be_falsey
+
+      SiteSetting.max_invites_per_day = 0
+
+      expect(Guardian.new(user).can_invite_to?(topic)).to be_falsey
+      # staff should be immune to max_invites_per_day setting
+      expect(Guardian.new(moderator).can_invite_to?(topic)).to be_truthy
     end
 
     it 'returns true when the site requires approving users and is mod' do
@@ -422,6 +451,32 @@ describe Guardian do
         expect(Guardian.new(user).can_see?(post)).to be_falsey
         expect(Guardian.new(admin).can_see?(post)).to be_truthy
       end
+
+      it 'respects whispers' do
+        regular_post = Fabricate.build(:post)
+        whisper_post = Fabricate.build(:post, post_type: Post.types[:whisper])
+
+        anon_guardian = Guardian.new
+        expect(anon_guardian.can_see?(regular_post)).to eq(true)
+        expect(anon_guardian.can_see?(whisper_post)).to eq(false)
+
+        regular_user = Fabricate.build(:user)
+        regular_guardian = Guardian.new(regular_user)
+        expect(regular_guardian.can_see?(regular_post)).to eq(true)
+        expect(regular_guardian.can_see?(whisper_post)).to eq(false)
+
+        # can see your own whispers
+        regular_whisper = Fabricate.build(:post, post_type: Post.types[:whisper], user: regular_user)
+        expect(regular_guardian.can_see?(regular_whisper)).to eq(true)
+
+        mod_guardian = Guardian.new(Fabricate.build(:moderator))
+        expect(mod_guardian.can_see?(regular_post)).to eq(true)
+        expect(mod_guardian.can_see?(whisper_post)).to eq(true)
+
+        admin_guardian = Guardian.new(Fabricate.build(:admin))
+        expect(admin_guardian.can_see?(regular_post)).to eq(true)
+        expect(admin_guardian.can_see?(whisper_post)).to eq(true)
+      end
     end
 
     describe 'a PostRevision' do
@@ -530,7 +585,6 @@ describe Guardian do
         category.save
 
         expect(Guardian.new(topic.user).can_create?(Post, topic)).to be_falsey
-
       end
 
       it "is false when not logged in" do
@@ -888,6 +942,13 @@ describe Guardian do
 
         it 'returns true at trust level 3' do
           expect(Guardian.new(trust_level_3).can_edit?(topic)).to eq(true)
+        end
+
+        it "returns false when the category is read only" do
+          topic.category.set_permissions(everyone: :readonly)
+          topic.category.save
+
+          expect(Guardian.new(trust_level_3).can_edit?(topic)).to eq(false)
         end
       end
 
@@ -1609,11 +1670,11 @@ describe Guardian do
     end
 
     it "is true for admin anonymizing a regular user" do
-      Guardian.new(admin).can_anonymize_user?(user).should == true
+      expect(Guardian.new(admin).can_anonymize_user?(user)).to eq(true)
     end
 
     it "is true for moderator anonymizing a regular user" do
-      Guardian.new(moderator).can_anonymize_user?(user).should == true
+      expect(Guardian.new(moderator).can_anonymize_user?(user)).to eq(true)
     end
 
     it "is false for admin anonymizing an admin" do

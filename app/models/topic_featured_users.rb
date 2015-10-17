@@ -24,6 +24,8 @@ class TopicFeaturedUsers
 
   def self.ensure_consistency!(topic_id=nil)
 
+    filter = "#{"AND t.id = #{topic_id.to_i}" if topic_id}"
+
     sql = <<SQL
 
 WITH cte as (
@@ -36,8 +38,10 @@ WITH cte as (
     JOIN posts p ON p.topic_id = t.id
     WHERE p.deleted_at IS NULL AND
           NOT p.hidden AND
+          p.post_type in (#{Topic.visible_post_types.join(",")}) AND
           p.user_id <> t.user_id AND
           p.user_id <> t.last_post_user_id
+          #{filter}
     GROUP BY t.id, p.user_id
 ),
 
@@ -69,7 +73,7 @@ WHERE x.id = tt.id AND
   COALESCE(featured_user2_id,-99) <> COALESCE(featured_user2,-99) OR
   COALESCE(featured_user3_id,-99) <> COALESCE(featured_user3,-99) OR
   COALESCE(featured_user4_id,-99) <> COALESCE(featured_user4,-99)
-) #{"AND x.id = #{topic_id.to_i}" if topic_id}
+)
 SQL
 
     Topic.exec_sql(sql)
@@ -78,6 +82,7 @@ SQL
   private
 
     def update_participant_count
-      topic.update_columns(participant_count: topic.posts.count('distinct user_id'))
+      count = topic.posts.where('NOT hidden AND post_type in (?)', Topic.visible_post_types).count('distinct user_id')
+      topic.update_columns(participant_count: count)
     end
 end

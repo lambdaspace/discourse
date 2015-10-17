@@ -29,7 +29,8 @@ describe Admin::GroupsController do
         "automatic_membership_email_domains"=>nil,
         "automatic_membership_retroactive"=>false,
         "title"=>nil,
-        "primary_group"=>false
+        "primary_group"=>false,
+        "grant_trust_level"=>nil
       }])
     end
 
@@ -134,6 +135,16 @@ describe Admin::GroupsController do
         group.reload
         expect(group.users.count).to eq(2)
       end
+    end
+
+    it "returns 422 if member already exists" do
+      group = Fabricate(:group)
+      existing_member = Fabricate(:user)
+      group.add(existing_member)
+      group.save
+
+      xhr :put, :add_members, id: group.id, usernames: existing_member.username
+      expect(response.status).to eq(422)
     end
 
   end
