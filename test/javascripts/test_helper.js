@@ -21,9 +21,6 @@
 //= require ../../app/assets/javascripts/locales/i18n
 //= require ../../app/assets/javascripts/locales/en
 
-// Pagedown customizations
-//= require ../../app/assets/javascripts/pagedown_custom.js
-
 //= require vendor
 
 //= require htmlparser.js
@@ -91,7 +88,7 @@ QUnit.testStart(function(ctx) {
 
   // Allow our tests to change site settings and have them reset before the next test
   Discourse.SiteSettings = dup(Discourse.SiteSettingsOriginal);
-  Discourse.BaseUri = "/";
+  Discourse.BaseUri = "";
   Discourse.BaseUrl = "localhost";
   Discourse.Session.resetCurrent();
   Discourse.User.resetCurrent();
@@ -108,6 +105,9 @@ QUnit.testStart(function(ctx) {
   window.sandbox.stub(ScrollingDOMMethods, "screenNotFull");
   window.sandbox.stub(ScrollingDOMMethods, "bindOnScroll");
   window.sandbox.stub(ScrollingDOMMethods, "unbindOnScroll");
+
+  // Unless we ever need to test this, let's leave it off.
+  $.fn.autocomplete = Ember.K;
 
   // Don't debounce in test unless we're testing debouncing
   if (ctx.module.indexOf('debounce') === -1) {

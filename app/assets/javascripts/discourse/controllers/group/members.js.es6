@@ -3,7 +3,29 @@ export default Ember.Controller.extend({
   limit: null,
   offset: null,
 
+  isOwner: function() {
+    if (this.get('currentUser.admin')) {
+      return true;
+    }
+    const owners = this.get('model.owners');
+    const currentUserId = this.get('currentUser.id');
+    if (currentUserId) {
+      return !!owners.findBy('id', currentUserId);
+    }
+  }.property('model.owners.@each'),
+
   actions: {
+    removeMember(user) {
+      this.get('model').removeMember(user);
+    },
+
+    addMembers() {
+      const usernames = this.get('usernames');
+      if (usernames && usernames.length > 0) {
+        this.get('model').addMembers(usernames).then(() => this.set('usernames', []));
+      }
+    },
+
     loadMore() {
       if (this.get("loading")) { return; }
       // we've reached the end
@@ -11,7 +33,7 @@ export default Ember.Controller.extend({
 
       this.set("loading", true);
 
-      Discourse.Group.loadMembers(this.get("name"), this.get("model.members.length"), this.get("limit")).then(result => {
+      Discourse.Group.loadMembers(this.get("model.name"), this.get("model.members.length"), this.get("limit")).then(result => {
         this.get("model.members").addObjects(result.members.map(member => Discourse.User.create(member)));
         this.setProperties({
           loading: false,
